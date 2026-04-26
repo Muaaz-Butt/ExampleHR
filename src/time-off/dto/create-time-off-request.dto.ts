@@ -10,42 +10,71 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 
-@ValidatorConstraint({ name: 'DaysMatchDateRange', async: false })
-class DaysMatchDateRangeConstraint implements ValidatorConstraintInterface {
-  validate(days: number, args: ValidationArguments) {
-    const obj = args.object as CreateTimeOffRequestDto;
-    if (typeof days !== 'number' || typeof obj.startDate !== 'string' || typeof obj.endDate !== 'string') {
-      return false;
-    }
-
-    const start = new Date(obj.startDate);
-    const end = new Date(obj.endDate);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-      return false;
-    }
-
-    const diffMs = end.getTime() - start.getTime();
-    if (diffMs < 0) {
-      return false;
-    }
-
-    const diffDays = diffMs / (1000 * 60 * 60 * 24) + 1;
-    return diffDays === days;
+function parseIsoDate(value: string): Date | null {
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(value);
+  if (!match) {
+    return null;
   }
 
-  defaultMessage(args: ValidationArguments) {
-    return 'days must equal the inclusive number of days between startDate and endDate';
+  const [, yearStr, monthStr, dayStr] = match;
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+@ValidatorConstraint({ name: 'DaysWithinDateRange', async: false })
+class DaysWithinDateRangeConstraint implements ValidatorConstraintInterface {
+  validate(days: number, args: ValidationArguments) {
+    const obj = args.object as CreateTimeOffRequestDto;
+    if (
+      typeof days !== 'number' ||
+      typeof obj.startDate !== 'string' ||
+      typeof obj.endDate !== 'string'
+    ) {
+      return false;
+    }
+
+    const start = parseIsoDate(obj.startDate);
+    const end = parseIsoDate(obj.endDate);
+    if (!start || !end) {
+      return false;
+    }
+
+    // endDate must not be before startDate
+    if (end.getTime() < start.getTime()) {
+      return false;
+    }
+
+    // days must be positive and must not exceed the inclusive calendar span
+    // (allows half-days and partial-day values like 0.5)
+    const calendarDays = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24) + 1;
+    return days > 0 && days <= calendarDays;
+  }
+
+  defaultMessage(_args: ValidationArguments) {
+    return 'days must be a positive number that does not exceed the span between startDate and endDate';
   }
 }
 
-function DaysMatchDateRange(validationOptions?: ValidationOptions) {
+export function DaysWithinDateRange(validationOptions?: ValidationOptions) {
   return function (object: Object, propertyName: string) {
     registerDecorator({
       target: object.constructor,
       propertyName,
       options: validationOptions,
       constraints: [],
-      validator: DaysMatchDateRangeConstraint,
+      validator: DaysWithinDateRangeConstraint,
     });
   };
 }
@@ -59,8 +88,8 @@ export class CreateTimeOffRequestDto {
 
   @IsNumber()
   @Min(0.5)
-  @DaysMatchDateRange({
-    message: 'days must match the span between startDate and endDate',
+  @DaysWithinDateRange({
+    message: 'days must be a positive number that does not exceed the span between startDate and endDate',
   })
   days!: number;
 

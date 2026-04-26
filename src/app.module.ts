@@ -9,7 +9,7 @@ import { Balance } from './time-off/entities/balance.entity';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-function validateEnvironment(config: Record<string, string>) {
+export function validateEnvironment(config: Record<string, string>) {
   if (!config.HCM_API_BASE_URL) {
     throw new Error('Missing required environment variable: HCM_API_BASE_URL');
   }

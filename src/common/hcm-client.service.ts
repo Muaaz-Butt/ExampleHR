@@ -90,6 +90,10 @@ export class HcmClientService {
   }
 
   private handleHcmError(error: unknown): never {
+    if (error instanceof HcmInsufficientBalanceException || error instanceof HcmUnavailableException) {
+      throw error;
+    }
+
     if (isAxiosError(error)) {
       const status = error.response?.status;
       const message =

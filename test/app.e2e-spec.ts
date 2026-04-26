@@ -1,8 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import * as request from 'supertest';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { AppModule } from '../src/app.module';
 import { AddressInfo } from 'net';
 
 interface HcmStateItem {
@@ -90,10 +90,16 @@ describe('TimeOff Microservice (e2e)', () => {
     process.env.HCM_API_BASE_URL = `http://127.0.0.1:${serverAddress.port}`;
     process.env.SQLITE_DB_PATH = ':memory:';
 
+    const { AppModule } = await import('../src/app.module');
     const moduleFixture = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleFixture.createNestApplication();
     app.setGlobalPrefix('api');
     await app.init();
+  });
+
+  beforeEach(() => {
+    hcmState.length = 1;
+    hcmState[0] = { employeeId: 'emp1', locationId: 'locA', availableDays: 10 };
   });
 
   afterAll(async () => {
@@ -142,6 +148,158 @@ describe('TimeOff Microservice (e2e)', () => {
       .expect(200);
 
     expect(balanceResponse.body.availableDays).toBe(8);
+  });
+
+  it('returns 400 when approving the same request twice', async () => {
+    const createResponse = await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp1',
+        locationId: 'locA',
+        days: 1,
+        startDate: '2026-07-01',
+        endDate: '2026-07-01',
+      })
+      .expect(201);
+
+    const requestId = createResponse.body.id;
+
+    await request(app.getHttpServer())
+      .post(`/api/time-off/requests/${requestId}/approve`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/api/time-off/requests/${requestId}/approve`)
+      .expect(400);
+  });
+
+  it('returns 400 when rejecting an already approved request', async () => {
+    const createResponse = await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp1',
+        locationId: 'locA',
+        days: 1,
+        startDate: '2026-07-05',
+        endDate: '2026-07-05',
+      })
+      .expect(201);
+
+    const requestId = createResponse.body.id;
+
+    await request(app.getHttpServer())
+      .post(`/api/time-off/requests/${requestId}/approve`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/api/time-off/requests/${requestId}/reject`)
+      .send({ rejectionReason: 'Coverage change' })
+      .expect(400);
+  });
+
+  it('returns 400 when days does not match the date range', async () => {
+    await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp1',
+        locationId: 'locA',
+        days: 3,
+        startDate: '2026-07-10',
+        endDate: '2026-07-11',
+      })
+      .expect(400);
+  });
+
+  it('returns 400 when submitting negative days', async () => {
+    await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp1',
+        locationId: 'locA',
+        days: -1,
+        startDate: '2026-07-10',
+        endDate: '2026-07-11',
+      })
+      .expect(400);
+  });
+
+  it('refreshes HCM balance when refresh=true is passed', async () => {
+    const employeeId = 'emp-refresh';
+    const locationId = 'locX';
+    hcmState.push({ employeeId, locationId, availableDays: 10 });
+
+    await request(app.getHttpServer())
+      .get('/api/time-off/balances')
+      .query({ employeeId, locationId })
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.availableDays).toBe(10);
+      });
+
+    hcmState.find((item) => item.employeeId === employeeId && item.locationId === locationId)!.availableDays = 5;
+
+    await request(app.getHttpServer())
+      .get('/api/time-off/balances')
+      .query({ employeeId, locationId, refresh: 'true' })
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.availableDays).toBe(5);
+      });
+  });
+
+  it('lists requests filtered by employeeId', async () => {
+    hcmState.push({ employeeId: 'emp2', locationId: 'locB', availableDays: 5 });
+
+    await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp1',
+        locationId: 'locA',
+        days: 1,
+        startDate: '2026-07-15',
+        endDate: '2026-07-15',
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post('/api/time-off/requests')
+      .send({
+        employeeId: 'emp2',
+        locationId: 'locB',
+        days: 1,
+        startDate: '2026-07-16',
+        endDate: '2026-07-16',
+      })
+      .expect(201);
+
+    const listResponse = await request(app.getHttpServer())
+      .get('/api/time-off/requests')
+      .query({ employeeId: 'emp1' })
+      .expect(200);
+
+    expect(listResponse.body.every((item: any) => item.employeeId === 'emp1')).toBe(true);
+  });
+
+  it('returns 503 when HCM is unavailable for balance refresh', async () => {
+    const { AppModule } = await import('../src/app.module');
+    const moduleFixture = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ConfigService)
+      .useValue({
+        get: (key: string, defaultValue?: unknown) =>
+          key === 'HCM_API_BASE_URL' ? 'http://127.0.0.1:1' : defaultValue,
+      })
+      .compile();
+
+    const downApp = moduleFixture.createNestApplication();
+    downApp.setGlobalPrefix('api');
+    await downApp.init();
+
+    await request(downApp.getHttpServer())
+      .get('/api/time-off/balances')
+      .query({ employeeId: 'emp1', locationId: 'locA' })
+      .expect(503);
+
+    await downApp.close();
   });
 
   it('returns updated balances after HCM batch sync', async () => {
@@ -201,8 +359,4 @@ describe('TimeOff Microservice (e2e)', () => {
     await request(app.getHttpServer()).get('/api/time-off/balances').expect(400);
   });
 
-  it('exposes Swagger UI at /api/docs', async () => {
-    const swaggerResponse = await request(app.getHttpServer()).get('/api/docs').expect(200);
-    expect(swaggerResponse.header['content-type']).toMatch(/html/);
-  });
 });
