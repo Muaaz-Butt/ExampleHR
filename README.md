@@ -260,6 +260,11 @@ test/
 
 ---
 
+## Github Repo Link
+
+https://github.com/Muaaz-Butt/ExampleHR
+
+
 ## Deliverables Checklist
 
 - [x] `TRD.md` — Technical Requirements Document with challenges, solution, and alternatives
